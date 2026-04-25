@@ -34,6 +34,16 @@ tmp/
 .pico/
 artifacts/
 readme_intro_locked/
+.claude/
+.codex/
+.env
+openspec/
+test.md
+tmp-context-ablation.json
+
+# Local one-off files
+hello_world.py
+AGENTS.md
 
 # Local docs not intended for publication
 docs/

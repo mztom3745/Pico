@@ -438,23 +438,39 @@ class BenchmarkEvaluator:
 
     def run_task(self, task):
         task = dict(task)
+        # 题目里给的是“原始 fixture 仓库”的相对路径，例如 tests/fixtures/bench_repo_patch。
+        # 这里先定位到那份只读题本，后面不会直接在它上面运行 agent。
         fixture_source = self.repo_root / task["fixture_repo"]
+        # 每道 benchmark 题都会得到一份自己的工作副本目录。
+        # 目录结构里带 task id，避免不同题之间互相污染。
         fixture_copy_root = self.workspace_root / task["id"] / fixture_source.name
+        # 如果这道题之前已经跑过，先删掉旧副本，确保这次一定从“干净题本”开始。
         if fixture_copy_root.exists():
             shutil.rmtree(fixture_copy_root)
+        # 先创建副本目录的父目录，再把整份 fixture 仓库完整复制过去。
         fixture_copy_root.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(fixture_source, fixture_copy_root)
 
+        # 后续所有运行都基于这份副本 workspace，而不是原始 fixture。
+        # repo_root_override 让 Pico 把这份副本视为当前题目的仓库根目录。
         workspace = WorkspaceContext.build(
             fixture_copy_root,
             repo_root_override=fixture_copy_root,
         )
+        # session_store 保存“可恢复的会话状态”，run_store 保存“单次运行工件”。
+        # 两者都写到副本仓库自己的 .pico 目录里，保证题目之间互相隔离。
         session_store = SessionStore(fixture_copy_root / ".pico" / "sessions")
         run_store = RunStore(fixture_copy_root / ".pico" / "runs")
+        # 如果外部显式传入了真实模型工厂，就按外部配置创建模型客户端；
+        # 否则默认走 FakeModelClient + SCRIPTED_MODEL_OUTPUTS。
+        # 这条默认路径是 scripted baseline：先验证 harness 自己是否稳定，
+        # 不把真实模型波动混进 evaluator 主链路。
         if self.model_client_factory is not None:
             model_client = self.model_client_factory(task=task, workspace=workspace)
         else:
             model_client = FakeModelClient(_scripted_outputs_for_task(task))
+        # 构造一个真正可运行的 Pico。这里把 step_budget 直接映射成 max_steps，
+        # 这样 benchmark 的“预算约束”会真实落到 runtime 的主循环里。
         agent = Pico(
             model_client=model_client,
             workspace=workspace,
@@ -464,26 +480,39 @@ class BenchmarkEvaluator:
             max_steps=int(task["step_budget"]),
             max_new_tokens=self.max_new_tokens,
         )
+        # 某些 benchmark 题需要先人为注入上下文、checkpoint 或脏状态，
+        # 例如 context_reduction、freshness_mismatch、workspace_mismatch。
+        # 这些“考场布置”都在这里做完，再开始正式 ask()。
         _apply_task_setup(agent, task, fixture_copy_root)
 
+        # 记录运行开始前的初始状态，后面会写进 benchmark row。
+        # 这些字段用来证明：每道题是不是从一个干净 session / memory 状态起步的。
         initial_history_empty = len(agent.session["history"]) == 0
         initial_memory_state = agent.memory.to_dict()
         initial_memory_empty = memorylib.is_effectively_empty(initial_memory_state)
         initial_task_summary_empty = not str(initial_memory_state["working"]["task_summary"]).strip()
         initial_episodic_notes_empty = not initial_memory_state["episodic_notes"]
 
+        # 真正开始跑题。这里会进入 Pico.ask() 主循环：
+        # 组 prompt -> 调模型 -> 解析工具调用 / final -> 执行工具 -> 落盘 trace/report。
         final_answer = agent.ask(task["prompt"])
+        # ask() 结束后，从 agent 当前状态里把这次运行的重要工件路径和摘要取出来。
         task_state = agent.current_task_state
         run_dir = Path(agent.current_run_dir)
         task_state_path = agent.run_store.task_state_path(task_state)
         report_path = agent.run_store.report_path(task_state)
         report = agent.run_store.load_report(task_state.run_id)
 
+        # benchmark 里每道题都会声明一个“期望产物”对应的实际文件路径。
+        # 这里去副本仓库里检查那个文件是否存在，并计算 digest，方便复现和比对。
         artifact_path = _artifact_path_for_task(task)
         artifact_file = fixture_copy_root / artifact_path
         expected_artifact_exists = artifact_file.exists()
         artifact_digest = _digest_file(artifact_file) if expected_artifact_exists else ""
 
+        # verifier 是外部验收脚本。它不是看 agent 说没说 Done，
+        # 而是直接在副本仓库里检查结果是否真的达标。
+        # 这里用 shell=True 是因为 benchmark 里 verifier 本身就是一段完整命令字符串。
         verifier = subprocess.run(
             task["verifier"],
             cwd=fixture_copy_root,
@@ -492,10 +521,18 @@ class BenchmarkEvaluator:
             text=True,
         )
 
+        # 下面四个布尔条件一起定义“一道题是否真正通过”：
+        # 1. within_budget：工具步数没有超预算
+        # 2. verifier_passed：外部验收脚本返回码为 0
+        # 3. expected_artifact_exists：期望产物文件确实存在
+        # 4. non_failure_stop_reason：runtime 是正常收尾，不是 step limit / retry limit 停机
         within_budget = task_state.tool_steps <= int(task["step_budget"])
         verifier_passed = verifier.returncode == 0
         non_failure_stop_reason = task_state.stop_reason == STOP_REASON_FINAL_ANSWER_RETURNED
+        # 只有四个条件同时满足，这道题才算 pass。
         passed = within_budget and verifier_passed and expected_artifact_exists and non_failure_stop_reason
+        # 如果没通过，再把失败拆成更可解释的 failure_category，
+        # 方便后续 summary / metrics 统计失败分布。
         failure_category = None if passed else self._failure_category(
             within_budget=within_budget,
             verifier_passed=verifier_passed,
@@ -503,10 +540,14 @@ class BenchmarkEvaluator:
             non_failure_stop_reason=non_failure_stop_reason,
         )
 
+        # 返回一条完整的 benchmark row。
+        # 这条 row 既是“这道题的成绩单”，也是后面 benchmark artifact / metrics 的原始输入。
         return {
+            # 题目自身的静态信息：题号、prompt、fixture 来源、允许工具、类别等。
             "id": task["id"],
             "prompt": task["prompt"],
             "fixture_repo": task["fixture_repo"],
+            # 副本仓库与 run 目录路径都存成相对路径，避免 artifact 绑定某台机器的绝对路径。
             "fixture_copy_relpath": _workspace_relative(fixture_copy_root, self.workspace_root),
             "run_id": task_state.run_id,
             "run_dir_relpath": _workspace_relative(run_dir, self.workspace_root),
@@ -515,14 +556,18 @@ class BenchmarkEvaluator:
             "allowed_tools": list(task["allowed_tools"]),
             "step_budget": int(task["step_budget"]),
             "expected_artifact": task["expected_artifact"],
+            # artifact_path / exists / digest 这三项一起描述“题目产物”：
+            # 它应该落在哪、有没有落出来、内容哈希是多少。
             "artifact_path": artifact_path,
             "artifact_exists": expected_artifact_exists,
             "artifact_digest": artifact_digest,
+            # 把 verifier 命令和执行结果都带上，失败时更容易定位是 agent、verifier 还是合同本身的问题。
             "verifier": task["verifier"],
             "verifier_exit_code": verifier.returncode,
             "verifier_stdout": verifier.stdout,
             "verifier_stderr": verifier.stderr,
             "category": task["category"],
+            # 这几项是最终判定结果。
             "status": "pass" if passed else "fail",
             "passed": passed,
             "failure_category": failure_category,
@@ -530,14 +575,17 @@ class BenchmarkEvaluator:
             "verifier_passed": verifier_passed,
             "expected_artifact_exists": expected_artifact_exists,
             "non_failure_stop_reason": non_failure_stop_reason,
+            # 这几项描述这次运行本身的执行情况。
             "tool_steps": task_state.tool_steps,
             "attempts": task_state.attempts,
             "final_answer": final_answer,
             "stop_reason": task_state.stop_reason,
+            # 这几项保留“起跑线状态”，用于验证每道题是否从干净环境开始。
             "initial_history_empty": initial_history_empty,
             "initial_memory_empty": initial_memory_empty,
             "initial_task_summary_empty": initial_task_summary_empty,
             "initial_episodic_notes_empty": initial_episodic_notes_empty,
+            # 最后把 task_state 和 report 直接嵌进 row，方便后续聚合层继续分析过程细节。
             "task_state": task_state.to_dict(),
             "report": report,
         }

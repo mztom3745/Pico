@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 
 
-class FakeModelClient:
+class FakeModelClient:# 模拟模型，用于测试
     def __init__(self, outputs):
         self.outputs = list(outputs)
         self.prompts = []

@@ -126,6 +126,33 @@ def test_cli_build_agent_reads_secret_names_from_environment_config(tmp_path):
         assert agent.secret_env_summary()["secret_env_names"] == ["MCA_CUSTOM_SECRET"]
 
 
+def test_cli_build_agent_loads_openai_settings_from_workspace_dotenv(tmp_path):
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "OPENAI_API_KEY=right-codes-key\n"
+        "OPENAI_API_BASE=https://www.right.codes/codex/v1\n"
+        "OPENAI_MODEL=gpt-5.4\n",
+        encoding="utf-8",
+    )
+
+    with patch.dict(os.environ, {}, clear=True):
+        args = mini_cli.build_arg_parser().parse_args(
+            [
+                "--cwd",
+                str(tmp_path),
+                "--provider",
+                "openai",
+                "--approval",
+                "auto",
+            ]
+        )
+        agent = mini_cli.build_agent(args)
+
+    assert agent.model_client.api_key == "right-codes-key"
+    assert agent.model_client.base_url == "https://www.right.codes/codex/v1"
+    assert agent.model_client.model == "gpt-5.4"
+
+
 def test_run_shell_uses_allowlisted_environment_only(tmp_path):
     secret = "shh-allowlist-secret"
     agent = build_agent(tmp_path, [], approval_policy="auto")

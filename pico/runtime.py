@@ -73,7 +73,7 @@ class SessionStore:
 
     def save(self, session):
         path = self.path(session["id"])
-        path.write_text(json.dumps(session, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(session, indent=2, ensure_ascii=False), encoding="utf-8")
         return path
 
     def load(self, session_id):
@@ -561,7 +561,7 @@ class Pico:
         payload["event"] = event
         payload["created_at"] = now()
         # trace 是运行中的逐事件时间线，适合回答“这一轮 agent 到底做了什么”。
-        self.run_store.append_trace(task_state, payload)
+        self.run_store.append_trace(task_state, payload)# 记录下这轮调用的事件和参数
         return payload
 
     def capture_workspace_snapshot(self):
@@ -661,7 +661,7 @@ class Pico:
         if not path:
             return
 
-        canonical_path = self.memory.canonical_path(path)
+        canonical_path = self.memory.canonical_path(path)# 标准化路径，例如 ./a/b/c.py -> a/b/c.py
         # 不是所有工具结果都进入工作记忆。
         # 读文件会生成摘要；写文件/patch 会让旧摘要失效，因为它们可能过期了。
         if name in {"read_file", "write_file", "patch_file"}:
@@ -754,7 +754,8 @@ class Pico:
         return promoted, rejections, superseded
 
     def ask(self, user_message):
-        """执行一次完整的 agent 回合，直到产出最终答案或命中停止条件。
+        """
+        执行一次完整的 agent 回合，直到产出最终答案或命中停止条件。
 
         为什么存在：
         `ask()` 是整个 runtime 的总调度器。它把“用户提一个请求”扩展成一条

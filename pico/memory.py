@@ -60,12 +60,12 @@ class DurableMemoryStore:
     def __init__(self, root):
         self.root = Path(root)
         self.index_path = self.root / "MEMORY.md"
-        self.topics_dir = self.root / "topics"
+        self.topics_dir = self.root / "topics"# 主题目录
 
-    def topic_slugs(self):
+    def topic_slugs(self):# 加载内存索引文件中的所有主题 slug
         return [topic["topic"] for topic in self.load_index()]
 
-    def load_index(self):
+    def load_index(self):# 加载内存索引文件
         if not self.index_path.exists():
             return []
         lines = self.index_path.read_text(encoding="utf-8").splitlines()

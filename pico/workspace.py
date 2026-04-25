@@ -55,7 +55,7 @@ class WorkspaceContext:
     def build(cls, cwd, repo_root_override=None):
         cwd = Path(cwd).resolve()
 
-        def git(args, fallback=""):
+        def git(args, fallback=""):# 执行 git 命令并返回输出
             try:
                 result = subprocess.run(
                     ["git", *args],
@@ -78,7 +78,7 @@ class WorkspaceContext:
         # 同时扫描 repo_root 和 cwd，这样在子目录启动时也能看到本地文档；
         # 但用相对路径做 key，避免同一份文档被重复收集。
         for base in (repo_root, cwd):
-            for name in DOC_NAMES:
+            for name in DOC_NAMES:# 遍历项目文档白名单，包含 AGENTS.md, README.md, pyproject.toml, package.json
                 path = base / name
                 if not path.exists():
                     continue
@@ -87,7 +87,7 @@ class WorkspaceContext:
                     continue
                 docs[key] = clip(path.read_text(encoding="utf-8", errors="replace"), 1200)
 
-        return cls(
+        return cls(  # 构建工作区快照
             cwd=str(cwd),
             repo_root=str(repo_root),
             branch=git(["branch", "--show-current"], "-") or "-",

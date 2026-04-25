@@ -10,12 +10,13 @@ import os
 import shutil
 import sys
 import textwrap
+from pathlib import Path
 
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
 from .runtime import Pico, SessionStore
 from .workspace import WorkspaceContext, middle
 
-DEFAULT_SECRET_ENV_NAMES = (
+DEFAULT_SECRET_ENV_NAMES = ( #默认视为 secret 的环境变量名，后面用于脱敏
     "OPENAI_API_KEY",
     "OPENAI_API_TOKEN",
     "ANTHROPIC_API_KEY",
@@ -24,7 +25,7 @@ DEFAULT_SECRET_ENV_NAMES = (
     "GITHUB_PAT",
     "GH_PAT",
 )
-
+# 欢迎banner
 WELCOME_ART = (
     "        /\\___/\\\\",
     "       (  o o  )",
@@ -54,6 +55,32 @@ DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 DEFAULT_ANTHROPIC_BASE_URL = "https://www.right.codes/claude/v1"
 LEGACY_SECRET_ENV_NAMES_VAR = "MINI_CODING_AGENT_SECRET_ENV_NAMES"
 SECRET_ENV_NAMES_VAR = "PICO_SECRET_ENV_NAMES"
+
+
+def _strip_matching_quotes(value):
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _load_dotenv(dotenv_path):
+    path = Path(dotenv_path)
+    if not path.is_file():
+        return
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip()
+        if not name or name in os.environ:
+            continue
+        value = _strip_matching_quotes(value.strip())
+        os.environ[name] = value
 
 
 def _effective_model(args, provider):
@@ -196,21 +223,22 @@ def build_agent(args):
     - 输出：一个新的 `Pico`，或一个从旧 session 恢复出来的 `Pico`
 
     在 agent 链路里的位置：
-    它是整个程序启动链路里最靠近 runtime 的装配点。`main()` 先调它，
+    它是整个程序启动链路里最靠近 runtime 的装配点。`main()`先调它，
     得到 agent 后，后面无论是 one-shot 还是 REPL 模式，都会落到 `ask()`。
     """
     # 这里是 CLI 到 runtime 的装配点：
     # 先整理 secret 名单，再采集工作区快照，随后决定是恢复旧 session
     # 还是创建一个新的 Pico 实例。
-    configured_secret_names = _configured_secret_names(args)
-    workspace = WorkspaceContext.build(args.cwd)
-    store = SessionStore(workspace.repo_root + "/.pico/sessions")
+    _load_dotenv(Path(getattr(args, "cwd", ".")).resolve() / ".env")
+    configured_secret_names = _configured_secret_names(args)#敏感信息民丹
+    workspace = WorkspaceContext.build(args.cwd)# 构建工作区快照
+    store = SessionStore(workspace.repo_root + "/.pico/sessions")# 会话存储
     model = _build_model_client(args)
-    session_id = args.resume
+    session_id = args.resume# 恢复会话 ID
     if session_id == "latest":
         session_id = store.latest()
     if session_id:
-        return Pico.from_session(
+        return Pico.from_session(  # 从会话 ID 恢复 Pico 实例
             model_client=model,
             workspace=workspace,
             session_store=store,

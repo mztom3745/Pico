@@ -61,6 +61,14 @@ pip install -e .
 uv run pico
 ```
 
+如果你不想每次手动 `export`，也可以在工作区根目录放一个 `.env`，`pico` 启动时会自动加载其中尚未设置到当前 shell 的环境变量：
+
+```dotenv
+OPENAI_API_KEY=your-api-key
+OPENAI_API_BASE=https://www.right.codes/codex/v1
+OPENAI_MODEL=gpt-5.4
+```
+
 指定另一个工作目录：
 
 ```bash
